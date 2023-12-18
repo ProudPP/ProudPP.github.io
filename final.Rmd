@@ -1,0 +1,367 @@
+---
+title: "Final Bayesian"
+output:
+  html_document: default
+  pdf_document: default
+date: "2023-12-18"
+---
+
+```{r}
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+dat<-read.csv("ach.csv")
+dat <- dat %>%
+  mutate(class = as.character(class))
+glimpse(dat)
+dat
+```
+
+```{r}
+##average ach of each class
+dat %>% 
+  ggplot(aes(x = ach, y = after_stat(scaled)))+
+  geom_density(fill = "grey", adjust = 3, show.legend = F)+
+  geom_density(aes(fill = class, y= after_stat(density)*5), 
+               adjust = 1.5, show.legend = F, alpha = 0.5)+
+  theme_light()
+```
+
+```{r}
+dat %>%
+  group_by(class) %>%
+  summarise(num = length(unique(pupil)))
+```
+
+# No1 ANOVA f
+
+```{r}
+##ndefinedfrequentist
+dat_subset <- dat[, c("ach", "class")]
+freq_anova_result <- aov(ach ~ class, data = dat_subset)
+
+summary(freq_anova_result)
+
+```
+
+มีความแตกต่างกัน อย่างไร
+
+```{r}
+library(dplyr)
+library(brms)
+library(tidybayes)
+
+# Bayes model for homogeneity
+fit_ranova_bayes_homo <- brm(ach ~ 1 + (1|class), data = dat,
+                             family = gaussian(),
+                             save_pars = save_pars(all = TRUE),
+                             chains = 2,
+                             iter = 3000,
+                             thin = 3,
+                             cores = 2)
+
+# Summary of the homogeneity model
+summary(fit_ranova_bayes_homo)
+
+# Extract group means
+group_mean <- coef(fit_ranova_bayes_homo)
+
+# Homogeneity diagnostic plot
+fit_ranova_bayes_homo %>%
+  tidybayes::tidy_draws() %>%
+  mutate(icc = sd_class__Intercept^2 / (sd_class__Intercept^2 + sigma^2)) %>%
+  select(.chain, .iteration, icc) %>%
+  ggplot(aes(x = icc)) +
+  stat_halfeye() +
+  geom_vline(xintercept = 0.05, linetype = 2) +
+  xlim(0, 0.25) +
+  theme_tidybayes()
+
+# Heterogeneity model
+formula_het <- bf(ach ~ 1 + (1|class),
+                  sigma ~ 1 + (1|class))
+
+fit_ranova_bayes_het <- brm(formula_het, data = dat,
+                             family = gaussian(),
+                             save_pars = save_pars(all = TRUE),
+                             chains = 2,
+                             iter = 3000,
+                             thin = 3,
+                             cores = 2)
+
+# Summary of the heterogeneity model
+summary(fit_ranova_bayes_het)
+
+```
+
+```{r}
+library(ggplot2)
+
+# Extract group means
+group_mean <- as.data.frame(coef(fit_ranova_bayes_homo)$class)
+
+# Create a histogram using ggplot2
+ggplot(group_mean, aes(x = Estimate.Intercept)) +
+  geom_histogram(binwidth = 1, fill = "skyblue", color = "black", alpha = 0.7) +
+  labs(title = "Different in ach score of class",
+       x = "Different ach score",
+       y = "Frequency") +
+  theme_minimal() +
+  scale_x_continuous(breaks = seq(0, 10, by = 1))
+
+
+```
+
+```{r}
+library(lme4)
+library(lmerTest)
+fit_null_model<-lmer(ach~1+(1|class),dat)
+summary(fit_null_model)
+
+```
+
+# No2
+
+```{r}
+fit_means_model <- brm(ach ~  1 + texp + (1|class), data=dat,
+    family = gaussian(),
+    save_pars = save_pars(all = TRUE),
+    chains = 2,
+    iter = 3000,
+    thin = 3,
+    cores = 2)
+summary(fit_means_model)
+
+group_mean_no2<-coef(fit_means_model)
+group_mean_no2
+```
+
+# No3 regression
+
+```{r}
+ggplot(dat, aes(x = hour, y = ach)) +
+  geom_point() +  
+  geom_smooth(method = "lm", se = FALSE, color = "blue") +  
+  labs(title = "Scatter Plot of hour vs ach with Linear Regression Line", x = "hour", y = "ach") +
+  theme_minimal()
+```
+
+```{r}
+##mean as outcome regression model
+fit_reg_model <- brm(ach ~  1 + hour + (1|class), data=dat,
+    family = gaussian(),
+    save_pars = save_pars(all = TRUE),
+    chains = 2,
+    iter = 3000,
+    thin = 3,
+    cores = 2)
+summary(fit_reg_model)
+
+group_mean_no3<-coef(fit_reg_model)
+group_mean_no3
+```
+
+# No4 ancova
+
+```{r}
+ancova_model <- brm(ach ~ gender + texp + gender:texp + (1|class), data=dat,
+    family = gaussian(),
+    save_pars = save_pars(all = TRUE),
+    chains = 2,
+    iter = 3000,
+    thin = 3,
+    cores = 2)
+
+summary(ancova_model)
+```
+
+# CFA
+
+```{r}
+CFA <- read.csv("CFA.csv")
+glimpse(CFA)
+```
+
+```{r}
+library(lavaan)
+library(blavaan)
+library(dplyr)
+library(tidyr)
+library(tidybayes)
+library(ggplot2)
+library(purrr)
+```
+
+```{r}
+dat <- CFA |> 
+  select(starts_with("x")) |>
+  mutate_at(vars(starts_with("x")), scale)
+```
+
+```{r}
+###Baseline CFA
+## 1. model specification
+baseline_cfa <-'
+ fac1 =~ x1 + x2 + x3 + x4 + x5 + x6 '
+
+## 2. prepare function for iteration
+run_model <- function(model, data, seed = 123, 
+                      n.chain = 2, sample = 1000 ,
+                      burnin = 1000, adapt = 1000, thin = 1,
+                      dp = dpriors())
+{
+  set.seed(seed)
+  bcfa(model, data = data,
+              n.chains = n.chain,
+              sample = sample,
+              burnin = burnin,
+              adapt = adapt,
+              dp = dp,
+              bcontrol = list(cores = n.chain, thin = thin))
+}
+
+fit_baseline <- map(1:5, ~run_model(model = baseline_cfa, data = dat))
+
+
+fit_baseline[[1]] |> blavFitIndices(pD = "loo", rescale = "ppmc", fit.measures = "BRMSEA") |> summary()
+
+
+## extract fit index
+extract_fit <- function(result){
+  result |> blavFitIndices(pD = "loo", rescale = "ppmc", fit.measures = "BRMSEA") |> 
+    summary()
+}
+
+
+fit_index_list <- map(fit_baseline, extract_fit)
+
+fit_record <- fit_index_list |> 
+  bind_rows() |> 
+  mutate(model = "baseline")
+
+```
+
+```{r}
+###Baseline CFA
+## 1. model specification
+baseline_cfa2 <-'
+ fac1 =~ x1 + x2 + x3 
+ fac2 =~ x4 + x5 + x6 '
+
+## 2. prepare function for iteration
+run_model <- function(model, data, seed = 123, 
+                      n.chain = 2, sample = 1000 ,
+                      burnin = 1000, adapt = 1000, thin = 1,
+                      dp = dpriors())
+{
+  set.seed(seed)
+  bcfa(model, data = data,
+              n.chains = n.chain,
+              sample = sample,
+              burnin = burnin,
+              adapt = adapt,
+              dp = dp,
+              bcontrol = list(cores = n.chain, thin = thin))
+}
+
+fit_baseline2 <- map(1:5, ~run_model(model = baseline_cfa2, data = dat))
+
+
+fit_baseline2[[1]] |> blavFitIndices(pD = "loo", rescale = "ppmc", fit.measures = "BRMSEA") |> summary()
+
+
+## extract fit index
+extract_fit <- function(result){
+  result |> blavFitIndices(pD = "loo", rescale = "ppmc", fit.measures = "BRMSEA") |> 
+    summary()
+}
+
+
+fit_index_list <- map(fit_baseline2, extract_fit)
+
+fit_record <- fit_index_list |> 
+  bind_rows() |> 
+  mutate(model = "baseline2")
+fit_record 
+```
+
+```{r}
+cross_loadings <-'
+## main factor loadings
+ fac1 =~ x1 + prior("normal(0.5,100)")*x2 + prior("normal(0.5,100)")*x3
+ fac2 =~ x4 + prior("normal(0.5,100)")*x5 + prior("normal(0.5,100)")*x6
+ 
+  
+## cross-loadings
+fac1 =~ x4 + x5 + x6
+fac2 =~ x1 + x2 + x3 
+' 
+
+### ----- SD = 0.001 ----- ###
+fit_crossloading1 <- map(1:5, ~run_model(model = cross_loadings, data = dat,
+                                    dp = dpriors(lambda ="normal(0,0.001)")))
+
+
+
+fit_index_list <- map(fit_crossloading1, extract_fit)
+
+
+fit_record <- fit_record |> 
+  bind_rows(
+ fit_index_list |> 
+  bind_rows() |> 
+  mutate(model = "CL_SD0.001"))
+
+
+
+fit_record |> 
+  ggplot(aes(x=model, y=EAP))+
+  geom_point()+
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.2)+
+  theme_bw()
+
+### ----- SD = 0.01 -------- ###
+fit_crossloading2 <- map(1:5, ~run_model(model = cross_loadings, data = dat,
+                                    dp = dpriors(lambda ="normal(0,0.01)")))
+
+
+fit_index_list <- map(fit_crossloading2, extract_fit)
+
+
+fit_record <- fit_record |> 
+  bind_rows(
+ fit_index_list |> 
+  bind_rows() |> 
+  mutate(model = "CL_SD0.01"))
+
+fit_record |> 
+  ggplot(aes(x=model, y=EAP))+
+  geom_point()+
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.2)+
+  theme_bw()
+
+#### ---- SD = 0.1 ---- ####
+fit_crossloading3 <- map(1:5, ~run_model(model = cross_loadings, data = dat,
+                                    dp = dpriors(lambda ="normal(0,0.1)")))
+
+
+fit_index_list <- map(fit_crossloading3, extract_fit)
+
+
+fit_record <- fit_record |> 
+  bind_rows(
+ fit_index_list |> 
+  bind_rows() |> 
+  mutate(model = "CL_SD0.1"))
+
+fit_record |> 
+  ggplot(aes(x=model, y=EAP))+
+  geom_point()+
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.2)+
+  theme_bw()
+
+
+fit_crossloading3[[1]] %>% summary()
+```
